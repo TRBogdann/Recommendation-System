@@ -3,7 +3,6 @@ import sqlite3
 import time
 import random
 
-# ── Constants ────────────────────────────────────────────────────────────────
 
 PASSWORD_HASH = '$2a$12$bODggySyW.KzLdpCt/1BouCe0vpCxeDWZSvPHn6IHL.k5SsGzdtvq'
 
@@ -16,12 +15,9 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# ── Session ──────────────────────────────────────────────────────────────────
-
 session = requests.Session()
 session.headers.update(HEADERS)
 
-# ── DB: app.db ────────────────────────────────────────────────────────────────
 
 app_conn = sqlite3.connect("app.db")
 app_cursor = app_conn.cursor()
@@ -58,12 +54,9 @@ app_cursor.execute("""
 """)
 app_conn.commit()
 
-# ── DB: crawler.db ────────────────────────────────────────────────────────────
 
 crawler_conn = sqlite3.connect("crawler.db")
 crawler_conn.row_factory = sqlite3.Row
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 user_cache: dict[str, int] = {}
 
@@ -90,7 +83,6 @@ def get_or_create_user(username: str) -> int:
 
 
 def collect_comments(comment_list: list, post_db_id: int, depth: int = 0) -> int:
-    """Recursively insert all comments; returns count inserted."""
     count = 0
     for item in comment_list:
         if not isinstance(item, dict):
@@ -99,7 +91,7 @@ def collect_comments(comment_list: list, post_db_id: int, depth: int = 0) -> int
         data = item.get("data", {})
 
         if kind == "more":
-            continue  # would need extra API calls to expand
+            continue
         if kind != "t1":
             continue
 
@@ -162,7 +154,6 @@ def process_post(url: str):
     app_conn.commit()
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
 
 crawler_cursor = crawler_conn.execute("SELECT * FROM links WHERE visited = 0")
 rows = crawler_cursor.fetchall()
@@ -182,7 +173,7 @@ for row in rows:
             print("  Rate limited — pausing 5 minutes")
             time.sleep(300)
     finally:
-        jitter()  # polite delay after every request regardless
+        jitter()
 
 app_conn.close()
 crawler_conn.close()
