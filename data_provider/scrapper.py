@@ -167,7 +167,9 @@ for row in rows:
     except requests.HTTPError as err:
         status = err.response.status_code
         print(f"  HTTP {status} for {url}")
-        if status == 403:
+        if status == 403 or status == 404:
+            crawler_conn.execute("UPDATE links SET visited = 1 WHERE id = ?", (row["id"],))
+            crawler_conn.commit()
             jitter()
         elif status == 429:
             print("  Rate limited — pausing 5 minutes")

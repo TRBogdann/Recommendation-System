@@ -1,4 +1,3 @@
 
 .venv/
-data_provider/app.db
-data_provider/crawler.db
+data_provider/*.db
