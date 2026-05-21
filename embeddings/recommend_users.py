@@ -9,6 +9,11 @@ import faiss
 from sentence_transformers import SentenceTransformer
 from transformers import pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.sparse import csr_matrix
+from llm import generate_recommendation_explanation
+from collaborative_filtering import build_interaction_matrix, build_item_similarity_matrix, get_collaborative_score
+
 DB_PATH = "app.db"
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
@@ -346,6 +351,9 @@ def recommend_posts_for_user(user_id, top_x=10):
         interactions["post_id"].dropna().astype(int).tolist()
     )
 
+    interaction_matrix, user_mapping, post_mapping = build_interaction_matrix(DB_PATH)
+    similarity_df = build_item_similarity_matrix(interaction_matrix, post_mapping)
+
     results = []
 
     post_embeddings = np.load("post_embeddings.npy")
@@ -357,6 +365,12 @@ def recommend_posts_for_user(user_id, top_x=10):
         # Dacă nu vrei să recomanzi postări deja accesate, decomentează:
         # if post_id in interacted_post_ids:
         #     continue
+
+        collaborative_score = get_collaborative_score(
+            post_id,
+            interacted_post_ids,
+            similarity_df
+        )
 
         title = clean_value(post["title"])
         subreddit = clean_value(post["subreddit"])
@@ -388,7 +402,15 @@ def recommend_posts_for_user(user_id, top_x=10):
             user_dominant_sentiment
         )
 
-        final_score = semantic_score + subreddit_bonus + keyword_bonus + sentiment_bonus
+        final_score = 0.65 * semantic_score + 0.2 * collaborative_score + subreddit_bonus + keyword_bonus + sentiment_bonus
+        context = {
+            "user_keywords": user_keywords,
+            "user_subreddits": user_subreddits,
+            "recommended_title": title,
+            "recommended_subreddit": subreddit,
+            "semantic_score": semantic_score,
+            "collaborative_score": collaborative_score
+        }
 
         results.append({
             "rank": 0,
@@ -397,13 +419,15 @@ def recommend_posts_for_user(user_id, top_x=10):
             "subreddit": subreddit,
             "body": body[:300],
             "semantic_score": semantic_score,
+            "collaborative_score": collaborative_score,
             "subreddit_bonus": subreddit_bonus,
             "keyword_bonus": keyword_bonus,
             "post_sentiment": post_sentiment,
             "post_sentiment_confidence": post_sentiment_confidence,
             "user_dominant_sentiment": user_dominant_sentiment,
             "sentiment_bonus": sentiment_bonus,
-            "final_score": final_score
+            "final_score": final_score,
+            "llm_context": context
         })
 
     results = sorted(
@@ -417,7 +441,24 @@ def recommend_posts_for_user(user_id, top_x=10):
     for i, result in enumerate(results, start=1):
         result["rank"] = i
 
+        try:
+            explanation = generate_recommendation_explanation( 
+                user_keywords=result["llm_context"]["user_keywords"], 
+                user_subreddits=result["llm_context"]["user_subreddits"], 
+                recommended_title=result["llm_context"]["recommended_title"], 
+                recommended_subreddit=result["llm_context"]["recommended_subreddit"], 
+                semantic_score=result["llm_context"]["semantic_score"], 
+                collaborative_score=result["llm_context"]["collaborative_score"]
+            )
+            result["explanation"] = explanation
+        except Exception as e:
+            print(f"Error generating explanation for post_id={post_id}: {e}")
+            result["explanation"] = "No explanation available."
+        finally:
+            result.pop("llm_context", None)
+
     return username, results
+
 def main():
     username, results = recommend_posts_for_user(USER_ID, TOP_X)
 
@@ -446,6 +487,7 @@ def main():
         print(f"{post['rank']}. {post['title']}")
         print(f"   Subreddit: {post['subreddit']}")
         print(f"   Semantic score: {post['semantic_score']:.4f}")
+        print(f"   Collaborative score: {post['collaborative_score']:.4f}")
         print(f"   Subreddit bonus: {post['subreddit_bonus']:.4f}")
         print(f"   Keyword bonus: {post['keyword_bonus']:.4f}")
         print(f"   User dominant sentiment: {post['user_dominant_sentiment']}")

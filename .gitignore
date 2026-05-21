@@ -1,4 +1,16 @@
-
 .venv/
+.env
+env
+
+app.db
+cleared.db
 data_provider/app.db
 data_provider/crawler.db
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+.DS_Store
