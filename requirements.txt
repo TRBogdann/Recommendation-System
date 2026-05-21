@@ -5,3 +5,7 @@ sentence-transformers
 transformers
 scikit-learn
 torch
+huggingface-hub
+python-dotenv
+fastapi>=0.95.0
+uvicorn[standard]>=0.20.0
