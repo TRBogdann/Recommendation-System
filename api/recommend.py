@@ -1,7 +1,10 @@
 import re
+import os
 from collections import Counter
 from pathlib import Path
-import sqlite3
+from pymongo import MongoClient
+from pymongo.server_api import ServerApi
+from bson import ObjectId
 import numpy as np
 import pandas as pd
 import faiss
@@ -10,13 +13,16 @@ from transformers import pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.sparse import csr_matrix
-
 from .llm import generate_recommendation_explanation
+from dotenv import load_dotenv
+
+load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
 EMBEDDINGS_DIR = BASE_DIR / "data"
 
-DB_PATH = str(EMBEDDINGS_DIR / "app.db")
+DB_CONNECTION = f"mongodb+srv://{os.getenv("DB_USER")}:{os.getenv("DB_PASSWORD")}@cluster0.qurflfl.mongodb.net/"
+DB_SCHEMA = os.getenv("DB_SCHEMA")
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 _EMBEDDING_MODEL = None
@@ -65,14 +71,15 @@ def get_post_embeddings():
 
 
 def build_interaction_matrix():
-    conn = sqlite3.connect(DB_PATH)
+    mongo_client = MongoClient(
+        DB_CONNECTION,
+        server_api=ServerApi('1')
+    )
+    mongo_db = mongo_client[DB_SCHEMA]
 
-    interactions_df = pd.read_sql_query("""
-        SELECT user_id, post_id
-        FROM interactions
-    """, conn)
-
-    conn.close()
+    interactions_df = pd.DataFrame(
+        list(mongo_db.interactions.find({}, {"_id": 0, "user_id": 1, "post_id": 1}))
+    )
 
     interactions_df["interaction"] = 1
 
@@ -147,28 +154,46 @@ def clean_value(value):
 
 
 def load_user_interactions(user_id):
-    import sqlite3
+    user_id = ObjectId(user_id)
+                       
+    mongo_client = MongoClient(
+        DB_CONNECTION,
+        server_api=ServerApi('1')
+    )
+    mongo_db = mongo_client[DB_SCHEMA]
+    pipeline = [
+        {"$match": {"user_id": user_id}},
+        {"$lookup": {
+            "from": "users",
+            "localField": "user_id",
+            "foreignField": "_id",
+            "as": "user"
+        }},
+        {"$unwind": {"path": "$user", "preserveNullAndEmptyArrays": True}},
+        {"$lookup": {
+            "from": "posts",
+            "localField": "post_id",
+            "foreignField": "_id",
+            "as": "post"
+        }},
+        {"$unwind": {"path": "$post", "preserveNullAndEmptyArrays": True}},
+        {"$project": {
+            "_id": 0,
+            "user_id": 1,
+            "username": "$user.username",
+            "type": 1,
+            "comment": 1,
+            "post_id": "$post._id",
+            "title": "$post.title",
+            "subreddit": "$post.subreddit",
+            "body": "$post.body",
+        }},
+        {"$limit": 100},
+    ]
 
-    conn = sqlite3.connect(DB_PATH)
-
-    interactions = pd.read_sql_query("""
-        SELECT 
-            i.user_id,
-            u.username,
-            i.type,
-            i.comment,
-            p.id AS post_id,
-            p.title,
-            p.subreddit,
-            p.body
-        FROM interactions i
-        LEFT JOIN users u ON i.user_id = u.id
-        LEFT JOIN posts p ON i.post_id = p.id
-        WHERE i.user_id = ?
-        LIMIT 100;
-    """, conn, params=(user_id,))
-
-    conn.close()
+    interactions = pd.DataFrame(
+        list(mongo_db.interactions.aggregate(pipeline))
+    )
 
     return interactions
 
@@ -448,7 +473,7 @@ def recommend_posts_for_user(user_id, top_x=10):
     )
 
     interacted_post_ids = set(
-        interactions["post_id"].dropna().astype(int).tolist()
+        interactions["post_id"].dropna().tolist()
     )
 
     results = []
@@ -457,7 +482,7 @@ def recommend_posts_for_user(user_id, top_x=10):
 
     for rank, idx in enumerate(all_candidate_indices, start=1):
         post = posts_df.iloc[idx]
-        post_id = int(post["id"])
+        post_id = post["id"]
 
         collaborative_score = get_collaborative_score(
             post_id,
@@ -533,6 +558,7 @@ def recommend_posts_for_user(user_id, top_x=10):
 
     for i, result in enumerate(results, start=1):
         result["rank"] = i
+        result["id"] = str(result["id"])
 
         try:
             explanation = generate_recommendation_explanation( 
