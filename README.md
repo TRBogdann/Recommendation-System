@@ -37,7 +37,7 @@ Exemplu curl:
 ```bash
 curl -X POST http://localhost:8000/recommend \
   -H "Content-Type: application/json" \
-  -d '{"user_id": 649237, "top_x": 5}'
+  -d '{"user_id": "6a10b01772c79d7f2d1fa593", "top_x": 5}'
 ```
 
 ## Variabile .env

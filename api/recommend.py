@@ -21,7 +21,8 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent
 EMBEDDINGS_DIR = BASE_DIR / "data"
 
-DB_CONNECTION = f"mongodb+srv://{os.getenv("DB_USER")}:{os.getenv("DB_PASSWORD")}@cluster0.qurflfl.mongodb.net/"
+DB_CONNECTION = f"mongodb+srv://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@cluster0.qurflfl.mongodb.net/"
+DB_SCHEMA = os.getenv('DB_SCHEMA')
 DB_SCHEMA = os.getenv("DB_SCHEMA")
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
