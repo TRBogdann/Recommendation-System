@@ -2,16 +2,18 @@ import re
 from collections import Counter
 from pathlib import Path
 import sqlite3
+from dotenv import load_dotenv
+import os
 import numpy as np
 import pandas as pd
 import faiss
 from sentence_transformers import SentenceTransformer
-from transformers import pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from scipy.sparse import csr_matrix
 
 from .llm import generate_recommendation_explanation
+
+load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
 EMBEDDINGS_DIR = BASE_DIR / "data"
@@ -23,6 +25,11 @@ _EMBEDDING_MODEL = None
 _SENTIMENT_PIPELINE = None
 _FAISS_INDEX = None
 _POST_EMBEDDINGS = None
+
+_posts_df = None
+_similarity_df = None
+_interaction_matrix_cache = None
+_post_mapping_cache = None
 
 
 def get_embedding_model():
@@ -37,7 +44,13 @@ def get_embedding_model():
 def get_sentiment_pipeline():
     global _SENTIMENT_PIPELINE
 
+    USE_SENTIMENT = os.getenv("USE_SENTIMENT", "true").lower() == "true"
+    if not USE_SENTIMENT:
+        print("Sentiment analysis is disabled via environment variable.")
+        return None
+
     if _SENTIMENT_PIPELINE is None:
+        from transformers import pipeline
         _SENTIMENT_PIPELINE = pipeline(
             "sentiment-analysis",
             model="cardiffnlp/twitter-roberta-base-sentiment-latest"
@@ -63,8 +76,21 @@ def get_post_embeddings():
 
     return _POST_EMBEDDINGS
 
+def get_posts_df():
+    global _posts_df
+    if _posts_df is None:
+        _posts_df = pd.read_csv(str(EMBEDDINGS_DIR / "reddit_posts_metadata.csv"))
+    return _posts_df
 
-def build_interaction_matrix():
+
+def get_interaction_matrix():
+    global _interaction_matrix_cache, _post_mapping_cache
+
+    if _interaction_matrix_cache is not None:
+        return _interaction_matrix_cache, _post_mapping_cache
+
+    from scipy.sparse import csr_matrix
+
     conn = sqlite3.connect(DB_PATH)
 
     interactions_df = pd.read_sql_query("""
@@ -79,33 +105,38 @@ def build_interaction_matrix():
     user_ids = interactions_df["user_id"].astype("category")
     post_ids = interactions_df["post_id"].astype("category")
 
-    sparse_matrix = csr_matrix(
+    matrix = csr_matrix(
         (
             interactions_df["interaction"],
             (user_ids.cat.codes, post_ids.cat.codes)
         )
     )
 
-    return (
-        sparse_matrix,
-        user_ids.cat.categories,
-        post_ids.cat.categories
-    )
+    _interaction_matrix_cache = matrix
+    _post_mapping_cache = post_ids.cat.categories
+
+    return matrix, _post_mapping_cache
 
 
-def build_item_similarity_matrix(sparse_matrix, post_mapping):
-    item_matrix = sparse_matrix.T
+def get_similarity_df():
+    global _similarity_df
+
+    if _similarity_df is not None:
+        return _similarity_df
+
+    interaction_matrix, post_mapping = get_interaction_matrix()
+
+    item_matrix = interaction_matrix.T
 
     similarity_matrix = cosine_similarity(item_matrix)
 
-    similarity_df = pd.DataFrame(
+    _similarity_df = pd.DataFrame(
         similarity_matrix,
         index=post_mapping,
         columns=post_mapping
     )
 
-    return similarity_df
-
+    return _similarity_df
 
 def get_collaborative_score(
     candidate_post_id,
@@ -291,6 +322,9 @@ def map_sentiment_label(label):
 
 
 def analyze_text_sentiment(text, sentiment_pipeline):
+    if sentiment_pipeline is None:
+        return "neutral", 0.0
+    
     text = clean_value(text)
 
     if text == "":
@@ -417,13 +451,13 @@ def recommend_posts_for_user(user_id, top_x=10):
         sentiment_pipeline
     )
 
-    posts_df = pd.read_csv(str(EMBEDDINGS_DIR / "reddit_posts_metadata.csv"))
-    interaction_matrix, user_mapping, post_mapping = build_interaction_matrix()
-    similarity_df = build_item_similarity_matrix(interaction_matrix, post_mapping)
+    posts_df = get_posts_df()
+    similarity_df = get_similarity_df()
     index = get_faiss_index()
 
     user_embedding = embedding_model.encode(
         [user_profile_text],
+        batch_size=1,
         convert_to_numpy=True,
         normalize_embeddings=True
     )
