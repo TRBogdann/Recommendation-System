@@ -473,7 +473,7 @@ def recommend_posts_for_user(user_id, top_x=10):
     )
 
     interacted_post_ids = set(
-        interactions["post_id"].dropna().astype(int).tolist()
+        interactions["post_id"].dropna().tolist()
     )
 
     results = []
@@ -482,7 +482,7 @@ def recommend_posts_for_user(user_id, top_x=10):
 
     for rank, idx in enumerate(all_candidate_indices, start=1):
         post = posts_df.iloc[idx]
-        post_id = int(post["id"])
+        post_id = post["id"]
 
         collaborative_score = get_collaborative_score(
             post_id,
@@ -558,6 +558,7 @@ def recommend_posts_for_user(user_id, top_x=10):
 
     for i, result in enumerate(results, start=1):
         result["rank"] = i
+        result["id"] = str(result["id"])
 
         try:
             explanation = generate_recommendation_explanation( 

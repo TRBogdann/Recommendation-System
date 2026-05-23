@@ -3,13 +3,13 @@ from pydantic import BaseModel
 
 
 class RecommendRequest(BaseModel):
-    user_id: int
+    user_id: str
     top_x: Optional[int] = 10
 
 
 class Post(BaseModel):
     rank: int
-    id: int
+    id: str
     title: str
     subreddit: str
     body: str
@@ -26,7 +26,7 @@ class Post(BaseModel):
 
 
 class RecommendResponse(BaseModel):
-    user_id: int
+    user_id: str
     username: Optional[str]
     top_x: int
     recommended_posts: List[Post]
