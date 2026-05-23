@@ -1,453 +1,285 @@
-import re
-import os
-from collections import Counter
-from pathlib import Path
-from pymongo import MongoClient
-from pymongo.server_api import ServerApi
-from bson import ObjectId
-from dotenv import load_dotenv
-import os
+
 import numpy as np
-import pandas as pd
-import faiss
-from sentence_transformers import SentenceTransformer
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
-from .llm import generate_recommendation_explanation
-
-load_dotenv()
-
-BASE_DIR = Path(__file__).resolve().parent
-EMBEDDINGS_DIR = BASE_DIR / "data"
-
-DB_CONNECTION = f"mongodb+srv://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@cluster0.qurflfl.mongodb.net/"
-DB_SCHEMA = os.getenv('DB_SCHEMA')
-DB_SCHEMA = os.getenv("DB_SCHEMA")
-EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-
-_EMBEDDING_MODEL = None
-_SENTIMENT_PIPELINE = None
-_FAISS_INDEX = None
-_POST_EMBEDDINGS = None
-
-_posts_df = None
-_similarity_df = None
-_interaction_matrix_cache = None
-_post_mapping_cache = None
-
-
-def get_embedding_model():
-    global _EMBEDDING_MODEL
-
-    if _EMBEDDING_MODEL is None:
-        _EMBEDDING_MODEL = SentenceTransformer(EMBEDDING_MODEL_NAME)
-
-    return _EMBEDDING_MODEL
-
-
-def get_sentiment_pipeline():
-    global _SENTIMENT_PIPELINE
-
-    USE_SENTIMENT = os.getenv("USE_SENTIMENT", "true").lower() == "true"
-    if not USE_SENTIMENT:
-        print("Sentiment analysis is disabled via environment variable.")
-        return None
-
-    if _SENTIMENT_PIPELINE is None:
-        from transformers import pipeline
-        _SENTIMENT_PIPELINE = pipeline(
-            "sentiment-analysis",
-            model="cardiffnlp/twitter-roberta-base-sentiment-latest"
-        )
-
-    return _SENTIMENT_PIPELINE
-
-
-def get_faiss_index():
-    global _FAISS_INDEX
-
-    if _FAISS_INDEX is None:
-        _FAISS_INDEX = faiss.read_index(str(EMBEDDINGS_DIR / "reddit_posts.index"))
-
-    return _FAISS_INDEX
-
-
-def get_post_embeddings():
-    global _POST_EMBEDDINGS
-
-    if _POST_EMBEDDINGS is None:
-        _POST_EMBEDDINGS = np.load(str(EMBEDDINGS_DIR / "post_embeddings.npy"))
-
-    return _POST_EMBEDDINGS
-
-def get_posts_df():
-    global _posts_df
-    if _posts_df is None:
-        _posts_df = pd.read_csv(str(EMBEDDINGS_DIR / "reddit_posts_metadata.csv"))
-    return _posts_df
-
-
-def get_interaction_matrix():
-    global _interaction_matrix_cache, _post_mapping_cache
-
-    if _interaction_matrix_cache is not None:
-        return _interaction_matrix_cache, _post_mapping_cache
-
-    from scipy.sparse import csr_matrix
-
-    mongo_client = MongoClient(
-        DB_CONNECTION,
-        server_api=ServerApi('1')
-    )
-    mongo_db = mongo_client[DB_SCHEMA]
-
-    interactions_df = pd.DataFrame(
-        list(mongo_db.interactions.find({}, {"_id": 0, "user_id": 1, "post_id": 1}))
-    )
-
-    interactions_df["interaction"] = 1
-
-    user_ids = interactions_df["user_id"].astype("category")
-    post_ids = interactions_df["post_id"].astype("category")
-
-    matrix = csr_matrix(
-        (
-            interactions_df["interaction"],
-            (user_ids.cat.codes, post_ids.cat.codes)
-        )
-    )
-
-    _interaction_matrix_cache = matrix
-    _post_mapping_cache = post_ids.cat.categories
-
-    return matrix, _post_mapping_cache
-
-
-def get_similarity_df():
-    global _similarity_df
-
-    if _similarity_df is not None:
-        return _similarity_df
-
-    interaction_matrix, post_mapping = get_interaction_matrix()
-
-    item_matrix = interaction_matrix.T
-
-    similarity_matrix = cosine_similarity(item_matrix)
-
-    _similarity_df = pd.DataFrame(
-        similarity_matrix,
-        index=post_mapping,
-        columns=post_mapping
-    )
-
-    return _similarity_df
-
-def get_collaborative_score(
-    candidate_post_id,
-    interacted_post_ids,
-    similarity_df
-):
-    if candidate_post_id not in similarity_df.index:
-        return 0.0
-
-    similarities = []
-
-    for interacted_post_id in interacted_post_ids:
-        if interacted_post_id not in similarity_df.index:
-            continue
-
-        similarity = similarity_df.loc[
-            candidate_post_id,
-            interacted_post_id
-        ]
-
-        similarities.append(similarity)
-
-    if not similarities:
-        return 0.0
-
-    return float(np.mean(similarities))
-
-
-def clean_value(value):
-    if pd.isna(value):
-        return ""
-
-    value = str(value).strip()
-
-    if value.lower() in ["nan", "none", "null", "[deleted]", "[removed]"]:
-        return ""
-
-    return value
-
-
-def load_user_interactions(user_id):
-    user_id = ObjectId(user_id)
-                       
-    mongo_client = MongoClient(
-        DB_CONNECTION,
-        server_api=ServerApi('1')
-    )
-    mongo_db = mongo_client[DB_SCHEMA]
-    pipeline = [
-        {"$match": {"user_id": user_id}},
-        {"$lookup": {
-            "from": "users",
-            "localField": "user_id",
-            "foreignField": "_id",
-            "as": "user"
-        }},
-        {"$unwind": {"path": "$user", "preserveNullAndEmptyArrays": True}},
-        {"$lookup": {
-            "from": "posts",
-            "localField": "post_id",
-            "foreignField": "_id",
-            "as": "post"
-        }},
-        {"$unwind": {"path": "$post", "preserveNullAndEmptyArrays": True}},
-        {"$project": {
-            "_id": 0,
-            "user_id": 1,
-            "username": "$user.username",
-            "type": 1,
-            "comment": 1,
-            "post_id": "$post._id",
-            "title": "$post.title",
-            "subreddit": "$post.subreddit",
-            "body": "$post.body",
-        }},
-        {"$limit": 100},
-    ]
-
-    interactions = pd.DataFrame(
-        list(mongo_db.interactions.aggregate(pipeline))
-    )
-
-    return interactions
-
-
-def build_user_profile_text(interactions, user_keywords=None, user_subreddits=None):
-    if interactions.empty:
-        return None
-
-    username = interactions["username"].iloc[0]
-
-    comments = " ".join(
-        clean_value(comment)
-        for comment in interactions["comment"].tolist()
-    )
-
-    titles = " ".join(
-        clean_value(title)
-        for title in interactions["title"].dropna().unique().tolist()
-    )
-
-    subreddits_text = ", ".join(sorted(user_subreddits)) if user_subreddits else ""
-
-    keywords_text = ", ".join(user_keywords) if user_keywords else ""
-
-    profile_text = f"""
-User profile generated from Reddit interactions.
-Username: {username}
-
-The user frequently interacts with these subreddits:
-{subreddits_text}
-
-Important terms automatically extracted from the user's activity:
-{keywords_text}
-
-The user's comments:
-{comments}
-
-Titles of posts the user interacted with:
-{titles}
-
-Recommend Reddit posts that match the user's interests, communities, terminology, topics, and previous activity.
-""".strip()
-
-    return profile_text
-
-
-def extract_user_subreddits(interactions):
-    return set(
-        clean_value(subreddit).lower()
-        for subreddit in interactions["subreddit"].tolist()
-        if clean_value(subreddit)
-    )
-
-
-def extract_user_keywords(interactions, top_n=30):
-    texts = []
-
-    for _, row in interactions.iterrows():
-        comment = clean_value(row["comment"])
-        title = clean_value(row["title"])
-        subreddit = clean_value(row["subreddit"])
-
-        text = f"{comment} {title} {subreddit}".strip()
-
-        if text:
-            texts.append(text)
-
-    if not texts:
-        return []
-
-    vectorizer = TfidfVectorizer(
-        stop_words="english",
-        max_features=800,
-        ngram_range=(1, 2),
-        min_df=2,
-        max_df=0.70,
-        token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z0-9_]{2,}\b"
-    )
-
-    try:
-        tfidf_matrix = vectorizer.fit_transform(texts)
-    except ValueError:
-        return []
-
-    feature_names = vectorizer.get_feature_names_out()
-    scores = tfidf_matrix.sum(axis=0).A1
-
-    keyword_scores = list(zip(feature_names, scores))
-    keyword_scores = sorted(keyword_scores, key=lambda item: item[1], reverse=True)
-
-    keywords = []
-
-    for keyword, score in keyword_scores:
-        keyword = keyword.strip().lower()
-
-        if len(keyword) < 3:
-            continue
-
-        if keyword.isdigit():
-            continue
-
-        keywords.append(keyword)
-
-        if len(keywords) >= top_n:
-            break
-
-    return keywords
-
-
-def map_sentiment_label(label):
-    label = str(label).lower()
-
-    if "positive" in label or label == "label_2":
-        return "positive"
-
-    if "negative" in label or label == "label_0":
-        return "negative"
-
-    return "neutral"
-
-
-def analyze_text_sentiment(text, sentiment_pipeline):
-    if sentiment_pipeline is None:
-        return "neutral", 0.0
+from api.cleanup import clean_value
+from api.collaborative import get_collaborative_score, get_similarity_df, is_collaborative_enabled
+from api.embeddings import get_embedding, get_faiss_index, get_post_embeddings, get_posts_df
+from api.keywords import extract_user_keywords, get_keyword_bonus
+from api.profiling import build_user_profile_text, load_user_interactions
+from api.sentiment import analyze_text_sentiment, get_sentiment_bonus, get_sentiment_pipeline, infer_user_dominant_sentiment
+from api.subreddit import extract_user_subreddits, get_same_subreddit_candidate_indices, get_subreddit_bonus
+from api.llm import generate_recommendation_explanation
+
+
+
+# def get_collaborative_score(
+#     candidate_post_id,
+#     interacted_post_ids,
+#     similarity_df=None
+# ):
+#     if not USE_COLLABORATIVE: 
+#         return 0.0 
     
-    text = clean_value(text)
+#     if similarity_df is None: 
+#         return 0.0
+    
+#     if candidate_post_id not in similarity_df.index:
+#         return 0.0
 
-    if text == "":
-        return "neutral", 0.0
+#     similarities = []
 
-    result = sentiment_pipeline(text[:512])[0]
+#     for interacted_post_id in interacted_post_ids:
+#         if interacted_post_id not in similarity_df.index:
+#             continue
 
-    sentiment = map_sentiment_label(result["label"])
-    confidence = float(result["score"])
+#         similarity = similarity_df.loc[
+#             candidate_post_id,
+#             interacted_post_id
+#         ]
 
-    return sentiment, confidence
+#         similarities.append(similarity)
 
+#     if not similarities:
+#         return 0.0
 
-def infer_user_dominant_sentiment(interactions, sentiment_pipeline):
-    sentiments = []
-
-    for _, row in interactions.iterrows():
-        comment = clean_value(row["comment"])
-        title = clean_value(row["title"])
-
-        text = f"{comment}. {title}"
-
-        if text.strip() == ".":
-            continue
-
-        sentiment, confidence = analyze_text_sentiment(text, sentiment_pipeline)
-        sentiments.append(sentiment)
-
-    if not sentiments:
-        return "neutral", Counter()
-
-    counts = Counter(sentiments)
-    dominant_sentiment = counts.most_common(1)[0][0]
-
-    return dominant_sentiment, counts
+#     return float(np.mean(similarities))
 
 
-def get_sentiment_bonus(post_sentiment, user_dominant_sentiment):
-    if user_dominant_sentiment == "neutral":
-        if post_sentiment == "neutral":
-            return 0.01
-        return 0.0
+# def clean_value(value):
+#     if pd.isna(value):
+#         return ""
 
-    if post_sentiment == user_dominant_sentiment:
-        return 0.03
+#     value = str(value).strip()
 
-    if post_sentiment == "neutral":
-        return 0.01
+#     if value.lower() in ["nan", "none", "null", "[deleted]", "[removed]"]:
+#         return ""
 
-    return -0.02
+#     return value
 
 
-def get_subreddit_bonus(post_subreddit, user_subreddits):
-    post_subreddit = clean_value(post_subreddit).lower()
-
-    if post_subreddit in user_subreddits:
-        return 0.15
-
-    return 0.0
 
 
-def get_keyword_bonus(post_title, post_body, user_keywords):
-    post_text = f"{post_title} {post_body}".lower()
 
-    if not user_keywords:
-        return 0.0
+# def build_user_profile_text(interactions, user_keywords=None, user_subreddits=None):
+#     if interactions.empty:
+#         return None
 
-    matches = 0
+#     username = interactions["username"].iloc[0]
 
-    for keyword in user_keywords:
-        keyword = keyword.lower().strip()
+#     comments = " ".join(
+#         clean_value(comment)
+#         for comment in interactions["comment"].tolist()
+#     )
 
-        if not keyword:
-            continue
+#     titles = " ".join(
+#         clean_value(title)
+#         for title in interactions["title"].dropna().unique().tolist()
+#     )
 
-        pattern = r"\b" + re.escape(keyword) + r"\b"
+#     subreddits_text = ", ".join(sorted(user_subreddits)) if user_subreddits else ""
 
-        if re.search(pattern, post_text):
-            matches += 1
+#     keywords_text = ", ".join(user_keywords) if user_keywords else ""
 
-    bonus = matches * 0.005
+#     profile_text = f"""
+# User profile generated from Reddit interactions.
+# Username: {username}
 
-    return min(bonus, 0.04)
+# The user frequently interacts with these subreddits:
+# {subreddits_text}
+
+# Important terms automatically extracted from the user's activity:
+# {keywords_text}
+
+# The user's comments:
+# {comments}
+
+# Titles of posts the user interacted with:
+# {titles}
+
+# Recommend Reddit posts that match the user's interests, communities, terminology, topics, and previous activity.
+# """.strip()
+
+#     return profile_text
 
 
-def get_same_subreddit_candidate_indices(posts_df, user_subreddits, max_per_subreddit=100):
-    candidate_indices = []
+# def extract_user_subreddits(interactions):
+#     return set(
+#         clean_value(subreddit).lower()
+#         for subreddit in interactions["subreddit"].tolist()
+#         if clean_value(subreddit)
+#     )
 
-    for subreddit in user_subreddits:
-        matching_rows = posts_df[
-            posts_df["subreddit"].fillna("").str.lower() == subreddit
-        ]
 
-        if matching_rows.empty:
-            continue
+# def extract_user_keywords(interactions, top_n=30):
+#     texts = []
 
-        candidate_indices.extend(matching_rows.index.tolist()[:max_per_subreddit])
+#     for _, row in interactions.iterrows():
+#         comment = clean_value(row["comment"])
+#         title = clean_value(row["title"])
+#         subreddit = clean_value(row["subreddit"])
 
-    return candidate_indices
+#         text = f"{comment} {title} {subreddit}".strip()
+
+#         if text:
+#             texts.append(text)
+
+#     if not texts:
+#         return []
+
+#     vectorizer = TfidfVectorizer(
+#         stop_words="english",
+#         max_features=800,
+#         ngram_range=(1, 2),
+#         min_df=2,
+#         max_df=0.70,
+#         token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z0-9_]{2,}\b"
+#     )
+
+#     try:
+#         tfidf_matrix = vectorizer.fit_transform(texts)
+#     except ValueError:
+#         return []
+
+#     feature_names = vectorizer.get_feature_names_out()
+#     scores = tfidf_matrix.sum(axis=0).A1
+
+#     keyword_scores = list(zip(feature_names, scores))
+#     keyword_scores = sorted(keyword_scores, key=lambda item: item[1], reverse=True)
+
+#     keywords = []
+
+#     for keyword, score in keyword_scores:
+#         keyword = keyword.strip().lower()
+
+#         if len(keyword) < 3:
+#             continue
+
+#         if keyword.isdigit():
+#             continue
+
+#         keywords.append(keyword)
+
+#         if len(keywords) >= top_n:
+#             break
+
+#     return keywords
+
+
+# def map_sentiment_label(label):
+#     label = str(label).lower()
+
+#     if "positive" in label or label == "label_2":
+#         return "positive"
+
+#     if "negative" in label or label == "label_0":
+#         return "negative"
+
+#     return "neutral"
+
+
+# def analyze_text_sentiment(text, sentiment_pipeline):
+#     if sentiment_pipeline is None:
+#         return "neutral", 0.0
+    
+#     text = clean_value(text)
+
+#     if text == "":
+#         return "neutral", 0.0
+
+#     result = sentiment_pipeline(text[:512])[0]
+
+#     sentiment = map_sentiment_label(result["label"])
+#     confidence = float(result["score"])
+
+#     return sentiment, confidence
+
+
+# def infer_user_dominant_sentiment(interactions, sentiment_pipeline):
+#     sentiments = []
+
+#     for _, row in interactions.iterrows():
+#         comment = clean_value(row["comment"])
+#         title = clean_value(row["title"])
+
+#         text = f"{comment}. {title}"
+
+#         if text.strip() == ".":
+#             continue
+
+#         sentiment, confidence = analyze_text_sentiment(text, sentiment_pipeline)
+#         sentiments.append(sentiment)
+
+#     if not sentiments:
+#         return "neutral", Counter()
+
+#     counts = Counter(sentiments)
+#     dominant_sentiment = counts.most_common(1)[0][0]
+
+#     return dominant_sentiment, counts
+
+
+# def get_sentiment_bonus(post_sentiment, user_dominant_sentiment):
+#     if user_dominant_sentiment == "neutral":
+#         if post_sentiment == "neutral":
+#             return 0.01
+#         return 0.0
+
+#     if post_sentiment == user_dominant_sentiment:
+#         return 0.03
+
+#     if post_sentiment == "neutral":
+#         return 0.01
+
+#     return -0.02
+
+
+# def get_subreddit_bonus(post_subreddit, user_subreddits):
+#     post_subreddit = clean_value(post_subreddit).lower()
+
+#     if post_subreddit in user_subreddits:
+#         return 0.15
+
+#     return 0.0
+
+
+# def get_keyword_bonus(post_title, post_body, user_keywords):
+#     post_text = f"{post_title} {post_body}".lower()
+
+#     if not user_keywords:
+#         return 0.0
+
+#     matches = 0
+
+#     for keyword in user_keywords:
+#         keyword = keyword.lower().strip()
+
+#         if not keyword:
+#             continue
+
+#         pattern = r"\b" + re.escape(keyword) + r"\b"
+
+#         if re.search(pattern, post_text):
+#             matches += 1
+
+#     bonus = matches * 0.005
+
+#     return min(bonus, 0.04)
+
+
+# def get_same_subreddit_candidate_indices(posts_df, user_subreddits, max_per_subreddit=100):
+#     candidate_indices = []
+
+#     for subreddit in user_subreddits:
+#         matching_rows = posts_df[
+#             posts_df["subreddit"].fillna("").str.lower() == subreddit
+#         ]
+
+#         if matching_rows.empty:
+#             continue
+
+#         candidate_indices.extend(matching_rows.index.tolist()[:max_per_subreddit])
+
+#     return candidate_indices
 
 
 def recommend_posts_for_user(user_id, top_x=10):
@@ -467,7 +299,6 @@ def recommend_posts_for_user(user_id, top_x=10):
         user_subreddits=user_subreddits
     )
 
-    embedding_model = get_embedding_model()
     sentiment_pipeline = get_sentiment_pipeline()
 
     user_dominant_sentiment, sentiment_counts = infer_user_dominant_sentiment(
@@ -479,12 +310,7 @@ def recommend_posts_for_user(user_id, top_x=10):
     similarity_df = get_similarity_df()
     index = get_faiss_index()
 
-    user_embedding = embedding_model.encode(
-        [user_profile_text],
-        batch_size=1,
-        convert_to_numpy=True,
-        normalize_embeddings=True
-    )
+    user_embedding = get_embedding(user_profile_text)
 
     candidate_count = max(top_x * 20, 200)
 
@@ -553,7 +379,20 @@ def recommend_posts_for_user(user_id, top_x=10):
             user_dominant_sentiment
         )
 
-        final_score = 0.65 * semantic_score + 0.2 * collaborative_score + subreddit_bonus + keyword_bonus + sentiment_bonus
+        if is_collaborative_enabled(): 
+            final_score = ( 
+                0.65 * semantic_score + 
+                0.2 * collaborative_score + 
+                subreddit_bonus + 
+                keyword_bonus + 
+                sentiment_bonus ) 
+        else: 
+            final_score = (
+                0.85 * semantic_score + 
+                subreddit_bonus + 
+                keyword_bonus + 
+                sentiment_bonus )
+            
         context = {
             "user_keywords": user_keywords,
             "user_subreddits": user_subreddits,

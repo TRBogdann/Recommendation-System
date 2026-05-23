@@ -4,8 +4,8 @@ WORKDIR /app
 
 RUN pip install --upgrade pip setuptools wheel
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-deploy.txt .
+RUN pip install --no-cache-dir -r requirements-deploy.txt
 
 COPY . .
 
