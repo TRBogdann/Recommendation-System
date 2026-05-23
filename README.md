@@ -46,10 +46,13 @@ Creează un fișier `.env` în directorul `api` și adaugă variabilele necesare
 
 ```
 # Exemplu .env
-HF_TOKEN=<your-token>
+HF_TOKEN=<your-token-here>
+DB_USER=<your_db_user_here>
+DB_PASSWORD=<your_db_password_here>
+DB_SCHEMA=<your_db_schema_here>
 ```
 
-> Nota: Pentru a utiliza llm-ul si in scriptul `embeddings/recommend_users.py` e nevoie de adaugarea unui fisier `.env` cu HF_TOKEN setat si in folderul `embeddings`.
+> Nota: Pentru a utiliza llm-ul si in scriptul `embeddings/recommend_users.py` e nevoie de adaugarea unui fisier `.env` cu HF_TOKEN setat si in folderul `embeddings`, de asemenea vei avea nevoie de o conexiune MongoDB.
 
 ## Cum obții un Hugging Face (HF) Token
 
