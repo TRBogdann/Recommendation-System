@@ -1,11 +1,8 @@
-import os
+import sqlite3
 import re
 import json
 from collections import Counter
 
-from pymongo import MongoClient
-from pymongo.server_api import ServerApi
-from bson import ObjectId
 import numpy as np
 import pandas as pd
 import faiss
@@ -16,12 +13,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 from scipy.sparse import csr_matrix
 from llm import generate_recommendation_explanation
 from collaborative_filtering import build_interaction_matrix, build_item_similarity_matrix, get_collaborative_score
-from dotenv import load_dotenv
 
-load_dotenv()
+DB_PATH = "app.db"
 
-DB_CONNECTION = f"mongodb+srv://{os.getenv("DB_USER")}:{os.getenv("DB_PASSWORD")}@cluster0.qurflfl.mongodb.net/"
-DB_SCHEMA = os.getenv("DB_SCHEMA")
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 USER_ID = 649237
@@ -41,45 +35,26 @@ def clean_value(value):
 
 
 def load_user_interactions(user_id):
-    user_id = ObjectId(user_id)
-    mongo_client = MongoClient(
-        DB_CONNECTION,
-        server_api=ServerApi('1')
-    )
-    mongo_db = mongo_client[DB_SCHEMA]
-    pipeline = [
-        {"$match": {"user_id": user_id}},
-        {"$lookup": {
-            "from": "users",
-            "localField": "user_id",
-            "foreignField": "_id",
-            "as": "user"
-        }},
-        {"$unwind": {"path": "$user", "preserveNullAndEmptyArrays": True}},
-        {"$lookup": {
-            "from": "posts",
-            "localField": "post_id",
-            "foreignField": "_id",
-            "as": "post"
-        }},
-        {"$unwind": {"path": "$post", "preserveNullAndEmptyArrays": True}},
-        {"$project": {
-            "_id": 0,
-            "user_id": 1,
-            "username": "$user.username",
-            "type": 1,
-            "comment": 1,
-            "post_id": "$post._id",
-            "title": "$post.title",
-            "subreddit": "$post.subreddit",
-            "body": "$post.body",
-        }},
-        {"$limit": 100},
-    ]
+    conn = sqlite3.connect(DB_PATH)
 
-    interactions = pd.DataFrame(
-        list(mongo_db.interactions.aggregate(pipeline))
-    )
+    interactions = pd.read_sql_query("""
+        SELECT 
+            i.user_id,
+            u.username,
+            i.type,
+            i.comment,
+            p.id AS post_id,
+            p.title,
+            p.subreddit,
+            p.body
+        FROM interactions i
+        LEFT JOIN users u ON i.user_id = u.id
+        LEFT JOIN posts p ON i.post_id = p.id
+        WHERE i.user_id = ?
+        LIMIT 100;
+    """, conn, params=(user_id,))
+
+    conn.close()
 
     return interactions
 
