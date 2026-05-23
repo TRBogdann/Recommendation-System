@@ -1,10 +1,7 @@
 numpy
 pandas
 faiss-cpu
-sentence-transformers
-transformers
 scikit-learn
-torch
 huggingface-hub
 python-dotenv
 pymongo

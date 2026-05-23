@@ -10,12 +10,14 @@ Explain briefly and naturally why a Reddit post was recommended.
 Use only the provided context.
 """
 
-client = InferenceClient(
-    model="meta-llama/Meta-Llama-3-8B-Instruct",
-    token=os.getenv("HF_TOKEN"),
-    provider="auto"
-)
+_client = None 
 
+def get_client(): 
+    global _client 
+    if _client is None: 
+        from huggingface_hub import InferenceClient 
+        _client = InferenceClient( model="meta-llama/Meta-Llama-3-8B-Instruct", token=os.getenv("HF_TOKEN"), provider="auto" ) 
+    return _client
 
 def get_llm_response(prompt: str) -> str:
     messages = [
@@ -23,7 +25,7 @@ def get_llm_response(prompt: str) -> str:
         {"role": "user", "content": prompt}
     ]
 
-    response = client.chat_completion(
+    response = get_client().chat_completion(
         messages=messages,
         max_tokens=120,
         temperature=0.4
